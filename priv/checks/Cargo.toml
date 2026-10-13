@@ -1,0 +1,12 @@
+[package]
+name = "checks"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Source and branch checks for an Elixir project, run as a fast pass then a slow pass"
+
+[dependencies]
+globset = "0.4"
+rayon = "1"
+regex = "1"
+walkdir = "2"
