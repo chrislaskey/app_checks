@@ -8,6 +8,7 @@
     %{
       name: "default",
       base_ref: "main",
+      paths: ["."],
       checks: [
         enabled: [
           {:core_component_tags, config: [paths: ["test/fixtures/core_components.ex"]]}

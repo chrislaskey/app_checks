@@ -55,7 +55,11 @@ Gathered once per run, read-only, shared by every check.
   files all count. A deleted file is listed with no lines. An untracked
   file is listed with every line. From one `git diff -U0` call.
 
-Paths on the command line narrow both lists for that run.
+Paths on the command line, or the active config's `paths`, narrow both
+lists to what is under them, and its `exclude` drops what is under those.
+They are given to git as literal pathspecs, so git does the narrowing and
+a run over one part of a large project costs only that part. `.` is the
+whole project, the same as no path.
 
 ## A check
 

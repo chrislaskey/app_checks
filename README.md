@@ -107,7 +107,10 @@ mix app_checks.test                   # the Rust tests of every check
    has to: every file in the project, from `git ls-files`, and every file
    the branch changed since it left the base ref, with the lines it
    changed, from `git diff`. Commits, staged and unstaged edits and
-   untracked files all count. Git is only read, never fetched.
+   untracked files all count. The config's `paths` and `exclude`, or
+   paths on the command line, go to git as pathspecs, so a run over one
+   part of a large project lists and diffs only that part. Git is only
+   read, never fetched.
 3. Each enabled check runs in turn with its config and that state, and
    returns violations: a file, a line where there is one, and a message.
 4. Each violation prints with the check's level. `error` fails the run,
@@ -163,6 +166,8 @@ named configs, each a complete list of what runs and what it means.
       name: "default",
       # The git ref the branch is compared with. `--base REF` overrides it
       base_ref: "origin/main",
+      # Leave out a part of the project with its own config, see "admin" below
+      exclude: ["lib/example/admin", "test/example/admin"],
       checks: [
         # A check runs only when it is listed here. An atom alone runs with
         # the defaults, `level: :error` and `scope: :all`. A tuple sets either
@@ -189,6 +194,14 @@ named configs, each a complete list of what runs and what it means.
       ]
     },
     %{
+      # Only what is under these paths. Paths given to `mix app_checks`
+      # replace them for one run
+      name: "admin",
+      base_ref: "origin/main",
+      paths: ["lib/example/admin", "test/example/admin", "config"],
+      checks: [enabled: [:core_component_tags]]
+    },
+    %{
       name: "review",
       checks: [
         enabled: [
@@ -201,6 +214,13 @@ named configs, each a complete list of what runs and what it means.
 }
 ```
 
+- `paths`: the run looks only at what is under them. The whole project
+  when left out. Paths given on the command line replace them.
+- `exclude`: the run leaves out what is under them, even inside `paths`.
+  Both match whole path segments from the project root: `lib/admin`
+  covers `lib/admin/page.ex`, not `lib/admin_tools.ex`. Together they let
+  one project keep a config per part of the code, each run on its own,
+  such as one CI job per app in an umbrella-like repository.
 - `level`: what a violation means. `:error` fails the run, `:warning` is
   printed and does not. Default `:error`.
 - `scope`: which files the check looks at, `:all` or `:changed`. Default

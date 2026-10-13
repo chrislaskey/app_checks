@@ -85,6 +85,24 @@ defmodule AppChecks.ProgramTest do
              ]
     end
 
+    test "the config's excludes always apply, and paths given replace the config's" do
+      named = %{
+        name: "default",
+        base_ref: "main",
+        paths: ["lib", "config"],
+        exclude: ["lib/admin", "lib/tmp"],
+        enabled: [],
+        disabled: []
+      }
+
+      exclude = ["--exclude", "lib/admin", "--exclude", "lib/tmp"]
+
+      assert Program.arguments(named, []) ==
+               ["--base", "main"] ++ exclude ++ ["lib", "config"]
+
+      assert Program.arguments(named, ["test"]) == ["--base", "main"] ++ exclude ++ ["test"]
+    end
+
     test "a check the config does not enable is an error" do
       named = %{name: "default", base_ref: "main", enabled: [entry(:a)], disabled: []}
 
@@ -222,6 +240,18 @@ defmodule AppChecks.ProgramTest do
       refute output =~ "lib/page.html.heex"
     end
 
+    test "excludes leave paths out of the run", %{tmp_dir: dir} do
+      output =
+        capture_io(fn ->
+          assert_raise Mix.Error, ~r/found problems/, fn ->
+            run(dir, [@tags], exclude: ["lib/page.html.heex"])
+          end
+        end)
+
+      assert output =~ "lib/other.html.heex:1:"
+      refute output =~ "lib/page.html.heex"
+    end
+
     test "a review check reads the branch whatever its scope", %{tmp_dir: dir} do
       TestRepo.write(dir, "AGENTS.md", "new rules\n")
       TestRepo.write(dir, "lib/a.ex", "x\n")
@@ -269,7 +299,8 @@ defmodule AppChecks.ProgramTest do
 
   defp run(dir, enabled, opts \\ []) do
     {paths, opts} = Keyword.pop(opts, :paths, [])
-    named = %{name: "default", base_ref: "base", enabled: enabled, disabled: []}
+    {exclude, opts} = Keyword.pop(opts, :exclude, [])
+    named = %{name: "default", base_ref: "base", exclude: exclude, enabled: enabled, disabled: []}
     Program.run!(named, paths, [cd: dir] ++ opts)
   end
 end

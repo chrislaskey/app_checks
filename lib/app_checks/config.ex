@@ -11,6 +11,7 @@ defmodule AppChecks.Config do
           %{
             name: "default",
             base_ref: "main",
+            exclude: ["lib/my_app/admin"],
             checks: [
               enabled: [
                 :no_io_inspect,
@@ -30,7 +31,11 @@ defmodule AppChecks.Config do
   `mix app_checks` runs the config named `"default"`. `--config-name NAME`
   runs another. Configs do not merge: each one is the whole list for its
   run. In a config, `base_ref` is the git ref the branch is compared with,
-  `"main"` when left out. Under `checks`, `enabled` lists the checks that
+  `"main"` when left out. `paths` limits the run to what is under them,
+  the whole project when left out; paths given to `mix app_checks` replace
+  them. `exclude` drops what is under them, even inside `paths`. Both match
+  whole path segments from the project root, so `lib/admin` covers
+  `lib/admin/page.ex` but not `lib/admin_tools.ex`. Under `checks`, `enabled` lists the checks that
   run, in order, and `disabled` the checks the project knows about and
   chose not to run. A check in neither list does not run either, and the
   summary counts it, so a new check is not silently ignored.
@@ -52,7 +57,7 @@ defmodule AppChecks.Config do
   @levels [:error, :warning]
   @scopes [:all, :changed]
   @top_keys [:custom_checks, :configs]
-  @config_keys [:name, :base_ref, :checks]
+  @config_keys [:name, :base_ref, :paths, :exclude, :checks]
   @check_keys [:enabled, :disabled]
   @entry_keys [:level, :scope, :config]
 
@@ -72,7 +77,16 @@ defmodule AppChecks.Config do
   def defaults do
     %{
       custom_checks: @default_custom_checks,
-      configs: [%{name: "default", base_ref: @default_base_ref, enabled: [], disabled: []}]
+      configs: [
+        %{
+          name: "default",
+          base_ref: @default_base_ref,
+          paths: [],
+          exclude: [],
+          enabled: [],
+          disabled: []
+        }
+      ]
     }
   end
 
@@ -180,6 +194,9 @@ defmodule AppChecks.Config do
       Mix.raise("#{path}: #{where}: base_ref must be a git ref, got #{inspect(base_ref)}")
     end
 
+    paths = path_list!(config, :paths, path, where)
+    exclude = path_list!(config, :exclude, path, where)
+
     checks = Map.get(config, :checks, [])
 
     unless Keyword.keyword?(checks) do
@@ -207,7 +224,14 @@ defmodule AppChecks.Config do
       [name | _] -> Mix.raise("#{path}: #{where}: #{name} is both enabled and disabled")
     end
 
-    %{name: name, base_ref: base_ref, enabled: enabled, disabled: disabled}
+    %{
+      name: name,
+      base_ref: base_ref,
+      paths: paths,
+      exclude: exclude,
+      enabled: enabled,
+      disabled: disabled
+    }
   end
 
   defp normalize_entry!(name, _path, _where) when is_atom(name) do
@@ -252,6 +276,16 @@ defmodule AppChecks.Config do
     Mix.raise(
       "#{path}: #{where}: an enabled check is a name or a {name, options} tuple, got #{inspect(entry)}"
     )
+  end
+
+  defp path_list!(config, key, path, where) do
+    paths = Map.get(config, key, [])
+
+    unless is_list(paths) and Enum.all?(paths, &(is_binary(&1) and &1 != "")) do
+      Mix.raise("#{path}: #{where}: #{key} must be a list of paths, got #{inspect(paths)}")
+    end
+
+    paths
   end
 
   defp list!(checks, key, path, where) do

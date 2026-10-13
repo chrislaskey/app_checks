@@ -14,6 +14,8 @@ defmodule AppChecks.ConfigTest do
       %{
         name: "default",
         base_ref: "origin/main",
+        paths: ["lib", "config"],
+        exclude: ["lib/admin"],
         checks: [
           enabled: [
             :core_component_tags,
@@ -34,7 +36,16 @@ defmodule AppChecks.ConfigTest do
 
       assert Config.defaults() == %{
                custom_checks: "priv/checks",
-               configs: [%{name: "default", base_ref: "main", enabled: [], disabled: []}]
+               configs: [
+                 %{
+                   name: "default",
+                   base_ref: "main",
+                   paths: [],
+                   exclude: [],
+                   enabled: [],
+                   disabled: []
+                 }
+               ]
              }
     end
 
@@ -45,6 +56,8 @@ defmodule AppChecks.ConfigTest do
                  %{
                    name: "default",
                    base_ref: "origin/main",
+                   paths: ["lib", "config"],
+                   exclude: ["lib/admin"],
                    enabled: [
                      %{name: :core_component_tags, level: :error, scope: :all, config: []},
                      %{name: :no_io_inspect, level: :warning, scope: :changed, config: []},
@@ -57,7 +70,14 @@ defmodule AppChecks.ConfigTest do
                    ],
                    disabled: [:human_review]
                  },
-                 %{name: "review", base_ref: "main", enabled: [], disabled: []}
+                 %{
+                   name: "review",
+                   base_ref: "main",
+                   paths: [],
+                   exclude: [],
+                   enabled: [],
+                   disabled: []
+                 }
                ]
              }
     end
@@ -112,6 +132,16 @@ defmodule AppChecks.ConfigTest do
 
       assert_raise Mix.Error, ~r/base_ref must be a git ref, got :main/, fn ->
         Config.load(write(dir, ~s|%{configs: [%{name: "default", base_ref: :main}]}|))
+      end
+    end
+
+    test "rejects paths or excludes that are not a list of paths", %{tmp_dir: dir} do
+      assert_raise Mix.Error, ~r/paths must be a list of paths, got "lib"/, fn ->
+        Config.load(write(dir, ~s|%{configs: [%{name: "default", paths: "lib"}]}|))
+      end
+
+      assert_raise Mix.Error, ~r/exclude must be a list of paths, got \[""\]/, fn ->
+        Config.load(write(dir, ~s|%{configs: [%{name: "default", exclude: [""]}]}|))
       end
     end
 

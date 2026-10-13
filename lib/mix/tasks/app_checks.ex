@@ -48,6 +48,7 @@ defmodule Mix.Tasks.AppChecks do
           %{
             name: "default",
             base_ref: "main",
+            exclude: ["lib/my_app/admin"],
             checks: [
               enabled: [
                 {:core_component_tags, config: [paths: ["lib/my_app_web/components/core_components.ex"]]},
@@ -59,6 +60,11 @@ defmodule Mix.Tasks.AppChecks do
           }
         ]
       }
+
+  A config's `paths` limit the run to what is under them and its `exclude`
+  leaves paths out, so one project can have a config per part of the code.
+  Paths given on the command line replace the config's `paths`; `exclude`
+  still applies.
 
   A check runs only when it is enabled in the active config. `--check`
   narrows the run to one of them. `--scope` overrides every check's scope

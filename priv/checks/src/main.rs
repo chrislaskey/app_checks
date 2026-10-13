@@ -19,9 +19,12 @@
 //! - `--scope NAME=all|changed` is which files `NAME` looks at. `all` when
 //!   not given.
 //! - `--set NAME.KEY=VALUE` gives one of the check's own config keys.
+//! - `--exclude PATH` drops what is under `PATH` from both file lists.
+//!   Repeatable.
 //! - `--verbose` prints every stage as it happens, not only the result.
 //!
 //! Paths after the options narrow both file lists to what is under them.
+//! An excluded path is dropped even when it is under one of them.
 
 mod check;
 
@@ -53,6 +56,7 @@ struct Options {
     settings: Vec<(String, String)>,
     verbose: bool,
     roots: Vec<PathBuf>,
+    excludes: Vec<PathBuf>,
 }
 
 impl Default for Options {
@@ -66,6 +70,7 @@ impl Default for Options {
             settings: Vec::new(),
             verbose: false,
             roots: Vec::new(),
+            excludes: Vec::new(),
         }
     }
 }
@@ -96,7 +101,12 @@ fn run() -> Result<usize, String> {
             .map_err(|message| format!("{}: {message}", check.name()))?;
     }
 
-    let state = collect_state(&options.base, Path::new("."), &options.roots)?;
+    let state = collect_state(
+        &options.base,
+        Path::new("."),
+        &options.roots,
+        &options.excludes,
+    )?;
 
     let mut errors = 0;
     let mut warnings = 0;
@@ -154,11 +164,15 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Options, String> {
                     .ok_or_else(|| format!("--set {setting} must be NAME.KEY=VALUE"))?;
                 options.settings.push((key.to_string(), value.to_string()));
             }
+            "--exclude" => options
+                .excludes
+                .push(PathBuf::from(value_for(&mut args, &arg)?)),
             "--verbose" => options.verbose = true,
             flag if flag.starts_with("--") => {
                 return Err(format!(
                     "unknown option {flag}; the options are --base REF, --enable NAME, --disable NAME, \
-                     --level NAME=LEVEL, --scope NAME=SCOPE, --set NAME.KEY=VALUE and --verbose"
+                     --level NAME=LEVEL, --scope NAME=SCOPE, --set NAME.KEY=VALUE, --exclude PATH \
+                     and --verbose"
                 ));
             }
             path => options.roots.push(PathBuf::from(path)),
@@ -292,26 +306,54 @@ fn names(checks: &[&dyn Check]) -> String {
 /// `base`, with the lines it changed. Commits, staged and unstaged edits
 /// and untracked files all count. Paths are relative to `dir`, which is
 /// where the files are read from. Only paths under one of `roots` are kept
-/// when any are given. Git is only read. Nothing is fetched or changed.
-fn collect_state(base: &str, dir: &Path, roots: &[PathBuf]) -> Result<State, String> {
+/// when any are given, and none under one of `excludes`. Git does that
+/// narrowing itself, through pathspecs, so a run over one part of a large
+/// project lists and diffs only that part. Git is only read. Nothing is
+/// fetched or changed.
+fn collect_state(
+    base: &str,
+    dir: &Path,
+    roots: &[PathBuf],
+    excludes: &[PathBuf],
+) -> Result<State, String> {
     let merge_base = merge_base(base, dir)?;
 
-    let tracked = git(dir, &["ls-files", "-z", "--cached"])?;
-    let untracked = git(dir, &["ls-files", "-z", "--others", "--exclude-standard"])?;
+    let roots: Vec<PathBuf> = roots
+        .iter()
+        .filter_map(|root| without_cur_dir(root))
+        .collect();
+    let excludes: Vec<PathBuf> = excludes
+        .iter()
+        .filter_map(|path| without_cur_dir(path))
+        .collect();
+    let pathspecs = pathspecs(&roots, &excludes);
+    let args = |fixed: &[&str]| -> Vec<String> {
+        fixed
+            .iter()
+            .map(|arg| arg.to_string())
+            .chain(pathspecs.iter().cloned())
+            .collect()
+    };
+
+    let tracked = git(dir, &args(&["ls-files", "-z", "--cached"]))?;
+    let untracked = git(
+        dir,
+        &args(&["ls-files", "-z", "--others", "--exclude-standard"]),
+    )?;
     let diffed = git(
         dir,
-        &[
+        &args(&[
             "diff",
             "--name-only",
             "--no-renames",
             "--relative",
             "-z",
             &merge_base,
-        ],
+        ]),
     )?;
     let lines = ChangedLines::parse(&String::from_utf8_lossy(&git(
         dir,
-        &[
+        &args(&[
             "-c",
             "core.quotePath=false",
             "diff",
@@ -323,12 +365,15 @@ fn collect_state(base: &str, dir: &Path, roots: &[PathBuf]) -> Result<State, Str
             "--src-prefix=a/",
             "--dst-prefix=b/",
             &merge_base,
-        ],
+        ]),
     )?));
 
-    let roots: Vec<PathBuf> = roots.iter().map(|root| without_cur_dir(root)).collect();
-    let under_roots =
-        |path: &Path| roots.is_empty() || roots.iter().any(|root| path.starts_with(root));
+    // Git already narrowed its output. This keeps the lists honest should
+    // a pathspec ever match more than a path prefix does.
+    let under_roots = |path: &Path| {
+        (roots.is_empty() || roots.iter().any(|root| path.starts_with(root)))
+            && !excludes.iter().any(|exclude| path.starts_with(exclude))
+    };
 
     let all: Vec<File> = paths(&[tracked.as_slice(), untracked.as_slice()])
         .into_iter()
@@ -430,9 +475,33 @@ fn hunk_added_lines(line: &str) -> Option<Range<usize>> {
     Some(start..start + count)
 }
 
-fn git(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+/// The pathspecs that make git list and diff only what is under `roots`,
+/// every root when there are none, and nothing under `excludes`: `--`,
+/// then one per root and one negative per exclude. Each is literal, so a
+/// path with `*` or `?` in it is itself. Empty when there is nothing to
+/// narrow by.
+fn pathspecs(roots: &[PathBuf], excludes: &[PathBuf]) -> Vec<String> {
+    let specs: Vec<String> = roots
+        .iter()
+        .map(|root| format!(":(literal){}", root.display()))
+        .chain(
+            excludes
+                .iter()
+                .map(|path| format!(":(literal,exclude){}", path.display())),
+        )
+        .collect();
+
+    if specs.is_empty() {
+        specs
+    } else {
+        std::iter::once("--".to_string()).chain(specs).collect()
+    }
+}
+
+fn git<S: AsRef<str>>(dir: &Path, args: &[S]) -> Result<Vec<u8>, String> {
+    let args: Vec<&str> = args.iter().map(|arg| arg.as_ref()).collect();
     let output = Command::new("git")
-        .args(args)
+        .args(&args)
         .current_dir(dir)
         .output()
         .map_err(|error| format!("could not run git: {error}"))?;
@@ -448,11 +517,15 @@ fn git(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     }
 }
 
-/// `./lib` as `lib`, so it compares equal to the paths git prints.
-fn without_cur_dir(path: &Path) -> PathBuf {
-    path.components()
+/// `./lib` as `lib`, so it compares equal to the paths git prints and can
+/// be given to git as a pathspec. `.` alone is the whole project, so it is
+/// `None`, the same as no path at all.
+fn without_cur_dir(path: &Path) -> Option<PathBuf> {
+    let path: PathBuf = path
+        .components()
         .filter(|component| *component != Component::CurDir)
-        .collect()
+        .collect();
+    (!path.as_os_str().is_empty()).then_some(path)
 }
 
 #[cfg(test)]
@@ -489,6 +562,8 @@ mod tests {
             "--verbose",
             "--set",
             "a.paths=mix.exs",
+            "--exclude",
+            "lib/ark",
             "test",
         ])
         .unwrap();
@@ -515,6 +590,7 @@ mod tests {
             options.roots,
             vec![PathBuf::from("lib"), PathBuf::from("test")]
         );
+        assert_eq!(options.excludes, vec![PathBuf::from("lib/ark")]);
     }
 
     #[test]
@@ -719,7 +795,7 @@ Binary files a/priv/static/logo.png and b/priv/static/logo.png differ
     #[allow(clippy::single_range_in_vec_init)]
     fn the_state_is_every_file_and_what_the_branch_changed_since_the_base() {
         let dir = temp_repo("state");
-        let state = collect_state("base", &dir, &[]).unwrap();
+        let state = collect_state("base", &dir, &[], &[]).unwrap();
         assert_eq!(state.base, "base");
         assert_eq!(
             names_of(state.all()),
@@ -763,16 +839,88 @@ Binary files a/priv/static/logo.png and b/priv/static/logo.png differ
     #[test]
     fn paths_narrow_both_lists() {
         let dir = temp_repo("roots");
-        let state = collect_state("base", &dir, &[PathBuf::from("./lib")]).unwrap();
+        let state = collect_state("base", &dir, &[PathBuf::from("./lib")], &[]).unwrap();
         assert_eq!(names_of(state.all()), vec!["lib/keep.txt"]);
         assert!(state.changed().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
+    fn the_current_directory_as_a_path_is_the_whole_project() {
+        let dir = temp_repo("dot");
+        let everything = collect_state("base", &dir, &[], &[]).unwrap();
+        let dot = collect_state("base", &dir, &[PathBuf::from(".")], &[]).unwrap();
+        assert_eq!(names_of(dot.all()), names_of(everything.all()));
+        assert_eq!(dot.changed(), everything.changed());
+        assert!(!everything.all().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pathspecs_are_literal_roots_then_negative_excludes_or_nothing() {
+        assert!(pathspecs(&[], &[]).is_empty());
+        assert_eq!(
+            pathspecs(
+                &[PathBuf::from("lib"), PathBuf::from("li*")],
+                &[PathBuf::from("lib/admin")]
+            ),
+            vec![
+                "--",
+                ":(literal)lib",
+                ":(literal)li*",
+                ":(literal,exclude)lib/admin"
+            ]
+        );
+        assert_eq!(
+            pathspecs(&[], &[PathBuf::from("lib/admin")]),
+            vec!["--", ":(literal,exclude)lib/admin"]
+        );
+    }
+
+    #[test]
+    fn a_dot_and_a_dot_slash_are_stripped() {
+        assert_eq!(
+            without_cur_dir(Path::new("./lib/./a")),
+            Some("lib/a".into())
+        );
+        assert_eq!(without_cur_dir(Path::new("lib")), Some("lib".into()));
+        assert_eq!(without_cur_dir(Path::new(".")), None);
+        assert_eq!(without_cur_dir(Path::new("./")), None);
+    }
+
+    #[test]
+    fn excludes_drop_paths_from_both_lists_even_under_a_root() {
+        let dir = temp_repo("excludes");
+        let excludes = [PathBuf::from("./lib"), PathBuf::from("a.txt")];
+        let state = collect_state("base", &dir, &[], &excludes).unwrap();
+        assert_eq!(
+            names_of(state.all()),
+            vec![".gitignore", "b.txt", "c.txt", "renamed.txt"]
+        );
+        assert!(
+            !state
+                .changed()
+                .iter()
+                .any(|file| file.path == Path::new("a.txt"))
+        );
+
+        let state = collect_state("base", &dir, &[PathBuf::from("lib")], &excludes).unwrap();
+        assert!(state.all().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_exclude_matches_whole_path_segments() {
+        let dir = temp_repo("exclude-segments");
+        let state = collect_state("base", &dir, &[], &[PathBuf::from("li")]).unwrap();
+        assert!(names_of(state.all()).contains(&"lib/keep.txt".to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_missing_base_is_an_error_that_says_what_to_do() {
         let dir = temp_repo("missing-base");
-        let error = collect_state("origin/nope", &dir, &[]).err().unwrap();
+        let error = collect_state("origin/nope", &dir, &[], &[]).err().unwrap();
         assert!(error.contains("could not find where the branch left origin/nope"));
         assert!(error.contains("--base REF"));
         let _ = std::fs::remove_dir_all(&dir);

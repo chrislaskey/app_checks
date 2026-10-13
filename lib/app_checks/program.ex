@@ -55,7 +55,8 @@ defmodule AppChecks.Program do
 
   @doc """
   Runs the built program with `named`, one config from `AppChecks.Config`,
-  over the project, or over `paths` when any are given. `opts`:
+  over the config's `paths`, or over `paths` when any are given, leaving
+  out the config's `exclude`. `opts`:
 
   - `base:` a git ref that overrides the config's `base_ref` for this run
   - `check:` the name of one enabled check to run on its own
@@ -98,7 +99,9 @@ defmodule AppChecks.Program do
   The command line arguments for the program from `named`, one config, and
   the `opts` of `run!/3`: `--base`, `--verbose` when asked, then for each
   enabled check `--enable`, `--level`, `--scope` and one `--set` per config
-  key, then one `--disable` per disabled check, then the paths.
+  key, then one `--disable` per disabled check, one `--exclude` per
+  excluded path, then the paths: `paths` when any are given, the config's
+  otherwise.
 
   With `check:` only that check is enabled; naming one the config does not
   enable raises. With `scope:` every check gets that scope.
@@ -130,8 +133,10 @@ defmodule AppChecks.Program do
       end)
 
     disable = Enum.flat_map(named.disabled, &["--disable", to_string(&1)])
+    exclude = Enum.flat_map(Map.get(named, :exclude, []), &["--exclude", &1])
+    paths = if paths == [], do: Map.get(named, :paths, []), else: paths
 
-    base ++ verbose ++ enable ++ disable ++ paths
+    base ++ verbose ++ enable ++ disable ++ exclude ++ paths
   end
 
   defp only(enabled, nil, _named), do: enabled
